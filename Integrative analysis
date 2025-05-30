@@ -1,0 +1,379 @@
+setwd("your-working-directory")
+
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(pheatmap)
+library(matrixStats)
+library(WGCNA)
+library(ViSEAGO)
+library(biomaRt)
+library(RColorBrewer)
+library("Hmisc")
+
+# load data ####
+metadata <- read.delim("./metadata.16s.txt")
+metadata$uniqueID<-str_split_i(metadata$sample.id,'-',2)
+metadata<-metadata %>%
+  subset(Week=='12') %>%
+  dplyr::select(Sema_ID,Treatment)
+
+#metadata<-metadata %>%
+# subset(Sema_ID %in% colnames(bile.16S.sub))
+
+## bile & 16S
+bile.16S.sub <- read.delim("./BA_16S_rawdat.sub.txt", row.names=1,check.names = F)
+bile.16S.sub <- bile.16S.sub %>%
+  dplyr::select(-c(Diet,Treatment)) %>%
+  scale(.) %>%
+  t(.) %>%
+  as.data.frame(.) %>%
+  mutate(var=rowVars(as.matrix(.))) %>%
+  subset(!is.na(var)) %>%
+  dplyr::select(-c(var))
+
+bile.16S.sub<-bile.16S.sub[,metadata$Sema_ID]
+
+bile.16S.sub$type<-c(rep('bile',27),
+                     rep('metagenome',41))
+
+
+## RNAseq. liver 
+liver.RNA <- read.csv("./liver.RNAseq.top2000.csv", row.names=1)
+liver.RNA<-as.data.frame(t(liver.RNA))
+liver.RNA<-as.data.frame(t(scale(liver.RNA)))
+rownames(liver.RNA)<-paste0(rownames(liver.RNA),'.RNA.liver')
+
+liver.RNA<-liver.RNA[,metadata$Sema_ID]
+liver.RNA$type<-'liver.RNA'
+
+## RNAseq. eWAT 
+eWAT.RNA <- read.csv("./eWAT.RNAseq.top2000.csv", row.names=1)
+
+eWAT.RNA<-as.data.frame(t(eWAT.RNA))
+eWAT.RNA<-as.data.frame(t(scale(eWAT.RNA)))
+
+rownames(eWAT.RNA)<-paste0(rownames(eWAT.RNA),'.RNA.eWAT')
+eWAT.RNA<-eWAT.RNA[,metadata$Sema_ID]
+eWAT.RNA$type<-'eWAT.RNA'
+
+## metabolome
+metabolome <- read.csv("./met.matrix.csv", row.names=1)
+
+
+metabolome<-as.data.frame(t(metabolome))
+metabolome<-as.data.frame(t(scale(metabolome)))
+metabolome<-metabolome[,metadata$Sema_ID]
+
+metabolome$type<-'metabolome'
+
+## proteome
+proteome <- read.csv("./protein.top.WGCNA.csv", row.names=1)
+
+proteome<-as.data.frame(t(proteome))
+proteome<-as.data.frame(t(scale(proteome)))
+
+rownames(proteome)<-paste0(rownames(proteome),'.p')
+proteome<-proteome[,metadata$Sema_ID]
+
+proteome$type<-'proteome'
+
+
+## Merge dataset ####
+
+all(colnames(bile.16S.sub)==colnames(metabolome))
+all(colnames(bile.16S.sub)==colnames(liver.RNA))
+all(colnames(bile.16S.sub)==colnames(eWAT.RNA))
+all(colnames(bile.16S.sub)==colnames(proteome))
+
+all.dat<-do.call(rbind, list(bile.16S.sub,metabolome,proteome,eWAT.RNA,liver.RNA))
+rowdat<-all.dat[,c(21),drop=F]
+
+all.dat$type<-NULL
+
+## pca ####
+pca<-prcomp(t(all.dat))
+pca_df<-as.data.frame(pca$x)
+
+rownames(metadata)<-metadata$Sema_ID
+all(rownames(pca_df)==rownames(metadata))
+
+pca_df$group<-metadata$Treatment
+pca_df$sample<-rownames(pca_df)
+
+pca.proportionvariances <- round((pca$sdev^2) / (sum(pca$sdev^2))*100,2)
+pca.proportionvariances <- paste(colnames(pca_df),"(",paste(as.character(pca.proportionvariances),"%",")", sep=""))
+
+ggplot(pca_df, aes(PC1, PC2, fill=group,label=sample)) +
+  geom_text()+
+  geom_point(size=5,pch=21,stroke=1.5) +
+  xlab(paste0(pca.proportionvariances[1],"% variance")) +
+  ylab(paste0(pca.proportionvariances[2],"% variance")) + 
+  #scale_fill_manual(values = col)+
+  theme(aspect.ratio = 1)+
+  coord_fixed()
+
+
+
+## actual WGCNA analysis ####
+# Check sample clustering to detect outliers
+sample_tree <- hclust(dist(t(all.dat)), method = "average")
+plot(sample_tree, main = "Sample Clustering to Detect Outliers", xlab = "", sub = "")
+
+# Test different powers to achieve scale-free topology
+powers <- c(1:20)
+sft <- pickSoftThreshold(t(all.dat), powerVector = powers, verbose = 5)
+
+# Plot the results
+par(mfrow = c(1, 2))
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3]) * sft$fitIndices[,2],
+     xlab = "Soft Threshold (Power)", ylab = "Scale Free Topology Model Fit (R²)",
+     main = "Scale Independence")
+abline(h = 0.90, col = "red")  # Aim for R² > 0.9
+
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+     xlab = "Soft Threshold (Power)", ylab = "Mean Connectivity",
+     main = "Mean Connectivity")
+
+# Set the selected power
+power <- 8  # Adjust based on the plot above
+
+# Build the adjacency matrix
+adjacency <- adjacency(t(all.dat), power = power)
+
+# Convert to Topological Overlap Matrix (TOM) to minimize noise
+TOM <- TOMsimilarity(adjacency)
+dissTOM <- 1 - TOM  # Dissimilarity measure
+
+# Cluster genes/modules
+geneTree <- hclust(as.dist(dissTOM), method = "average")
+
+# Plot the clustering tree
+plot(geneTree, xlab = "", sub = "", main = "Gene Clustering on TOM-based Dissimilarity")
+
+
+# Dynamic tree cutting to define modules
+dynamicMods <- cutreeDynamic(dendro = geneTree, distM = dissTOM,
+                             deepSplit = 2, pamRespectsDendro = FALSE,
+                             minClusterSize = 100)  # Adjust minClusterSize as needed
+
+# Assign module colors
+moduleColors <- labels2colors(dynamicMods)
+
+# Plot the module assignment
+plotDendroAndColors(geneTree, moduleColors, "Dynamic Tree Cut",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+
+## Relate Modules to External Traits (Optional) ####
+
+
+# Calculate module eigengenes
+MEs <- moduleEigengenes(t(all.dat), moduleColors)$eigengenes
+
+MEs <- orderMEs(MEs)
+module_order = names(MEs) %>% gsub("ME","", .)
+
+all(rownames(MEs)==rownames(metadata))
+MEs$treatment<-metadata$Treatment
+
+mME <- MEs %>%
+  tidyr::gather(module,value,1:16) %>%
+  group_by(treatment,module)%>%
+  summarise(mean=mean(value)) %>%
+  tidyr::spread(treatment,mean)
+
+mME<-as.data.frame(mME)
+rownames(mME)<-mME$module
+mME$module<-NULL 
+
+mME<-mME[,c(2,1,3,4,5)]
+mME.sub<-subset(mME,!rownames(mME) %in% c('MEgrey','MEmidnightblue','MEpurple')) # not relevant to the effect of Sema & Rev
+
+hm_color<- colorRampPalette(rev(brewer.pal(11, "RdBu")))(100)
+break_hm = seq(-0.5, 0.5,length.out=100)
+
+p_WCGNA_hm<-pheatmap(mME.sub,scale='none',border_color = 'white',color = hm_color,
+                     show_rownames = T,show_colnames = T,
+                     cluster_rows = T,cluster_cols =F,
+                     #annotation_row = rowdat.sub,
+                     breaks = break_hm,
+                     #annotation_colors = my_color_annotation,
+                     cellwidth = 15,cellheight = 15,
+                     #angle_col = 45,
+                     #gaps_col = c(4,8),
+                     clustering_distance_rows = "correlation",
+                     clustering_distance_cols = "correlation"
+)
+
+dev.new()
+pdf('p_WCGNA_hm.pdf')
+p_WCGNA_hm
+dev.off()
+
+
+
+# obtain the gene from each modules
+levels(factor(moduleColors))
+# "black"        "blue"         "brown"        "cyan"         "green"        "greenyellow"  "grey"         "magenta"      "midnightblue"
+# "pink"         "purple"       "red"          "salmon"       "tan"          "turquoise"    "yellow"     
+
+# Get genes in a module of interest
+
+
+output.df<-data.frame(rowdat,moduleColors)
+
+output.df$count<-1
+
+output.df <- output.df %>%
+  subset(!moduleColors %in% c('grey',
+                              'midnightblue',
+                              'purple'))
+
+output.df$moduleColors<-factor(output.df$moduleColors,
+                               levels=c(
+                                 'yellow',
+                                 'blue',
+                                 'brown',
+                                 'pink',
+                                 'green',
+                                 'greenyellow',
+                                 'black',
+                                 'tan',
+                                 'salmon',
+                                 'red',
+                                 'cyan',
+                                  'turquoise',
+                                 'magenta'
+                               ))
+
+
+output.df$type <- factor(output.df$type,
+                         levels=c(
+                           'liver.RNA',
+                           'eWAT.RNA',
+                           'proteome',
+                           'metabolome',
+                           'metagenome',
+                           'bile'
+                         ))
+
+
+color_wgcna <-brewer.pal(7,'Set2')[-6]
+
+
+p_bar_type<-ggplot(output.df,aes(x=moduleColors,y=count,fill=type)) +
+  geom_col() +
+  scale_fill_manual(values=color_wgcna)+
+  facet_grid(~type,scales = 'free')+
+  coord_flip()+
+  theme_minimal()
+
+dev.new()
+pdf('p_bar_type.pdf')
+p_bar_type
+dev.off()
+
+
+output.df <- output.df %>%
+  mutate(pattern.sema=case_when(moduleColors %in% c('magenta','turquoise','cyan')~'Sema.up',
+                                moduleColors %in% c('salmon','tan','black','greenyellow','green','pink','yellow')~'Sema.down',
+                                T~NA),
+         pattern.rev=case_when(moduleColors %in% c('turquoise','cyan','red')~'Rev.up',
+                               moduleColors %in% c('salmon','tan','black','greenyellow','green','pink','yellow','brown','blue')~'Rev.down',
+                               T~NA),
+         pattern.common=case_when(grepl(pattern.sema,pattern="up") & grepl(pattern.rev,pattern="up")~"common.up",
+                                  grepl(pattern.sema,pattern="down") & grepl(pattern.rev,pattern="down")~"common.down",
+                                  T~NA))
+
+write.csv(output.df,'WCGNA.output.all.csv')
+
+## pairwise correlation  #####
+
+
+##find correlated genes
+flattenCorrMatrix <- function(cormat, pmat) {
+  ut <- upper.tri(cormat)
+  data.frame(
+    row = rownames(cormat)[row(cormat)[ut]],
+    column = rownames(cormat)[col(cormat)[ut]],
+    cor  =(cormat)[ut],
+    p = pmat[ut]
+  )
+}
+
+# sema 
+sema.feature <- output.df %>%
+  subset(!is.na(pattern.sema)) %>%
+  rownames(.)
+sema.group<-metadata %>%
+  subset(Treatment %in% c('LP','LPS')) %>%
+  rownames(.)
+
+corr.sema <-all.dat[sema.feature,sema.group]
+corr.sema<- rcorr(as.matrix(t(corr.sema)),type=c("spearman"))
+corr.sema.df<-as.data.frame(flattenCorrMatrix(corr.sema$r,corr.sema$P))
+corr.sema.df$FDR<-p.adjust(corr.sema.df$p,method='fdr')
+
+corr.sema.df <- corr.sema.df %>%
+  subset(abs(cor)>0.95 & FDR<0.05)
+corr.sema.df$logp<--log10(corr.sema.df$FDR+0.000231269)
+
+write.csv(corr.sema.df,'corr.sema.df.csv')
+
+
+
+
+# rev 
+rev.feature <- output.df %>%
+  subset(!is.na(pattern.rev)) %>%
+  rownames(.)
+rev.group<-metadata %>%
+  subset(Treatment %in% c('LP','Rev')) %>%
+  rownames(.)
+
+corr.rev <-all.dat[rev.feature,rev.group]
+corr.rev<- rcorr(as.matrix(t(corr.rev)),type=c("spearman"))
+corr.rev.df<-as.data.frame(flattenCorrMatrix(corr.rev$r,corr.rev$P))
+corr.rev.df$FDR<-p.adjust(corr.rev.df$p,method='fdr')
+
+corr.rev.df <- corr.rev.df %>%
+  subset(abs(cor)>0.95 & FDR<0.05)
+corr.rev.df$logp<--log10(corr.rev.df$FDR+5.296154e-07)
+
+write.csv(corr.rev.df,'corr.rev.df.csv')
+
+
+
+
+# diet
+diet.feature <- output.df %>%
+  rownames(.)
+
+diet.group<-metadata %>%
+  subset(Treatment %in% c('Ctrl','LP')) %>%
+  rownames(.)
+
+corr.diet <-all.dat[diet.feature,diet.group]
+corr.diet<- rcorr(as.matrix(t(all.dat)),type=c("spearman"))
+corr.diet.df<-as.data.frame(flattenCorrMatrix(corr.diet$r,corr.diet$P))
+corr.diet.df$FDR<-p.adjust(corr.diet.df$p,method='fdr')
+
+corr.diet.df <- corr.diet.df %>%
+  subset(abs(cor)>0.8 &FDR<0.05)
+
+corr.diet.df$logp<--log10(corr.diet.df$FDR+4.171788e-11)
+
+
+write.csv(corr.diet.df,'corr.diet.df.csv')
+
+#all 
+corr.diet.df$group <-'diet'
+corr.sema.df$group <- 'sema'
+corr.rev.df$group <-'rev'
+
+corr.all.df<-do.call(rbind,list(corr.diet.df,corr.sema.df,corr.rev.df))
+
+
+write.csv(corr.all.df,'corr.all.df.csv')
+
