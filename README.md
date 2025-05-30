@@ -9,10 +9,15 @@ Link: Pending
 
 ## Contents of the Repository
 Liver RNAseq: R script for differential gene expression analysis of the liver transcriptomes.
+
 WAT RNAseq: R script for differential gene expression analysis of the liver transcriptomes.
+
 16S: R script for analysis of the 16S rRNA gut microbiome.
+
 Proteomics: R script for analysis of circulating proteomics.
+
 Metabolomics: R script for analysis of circulating metabolomics.
+
 Integrative analysis: R script for data integration of multiomic layers.
 
 Overview
