@@ -1,9 +1,9 @@
-# Multiomic-fingerprints-of-GLP1RA-and-diet-intervention-in-MASLD
-
+# Complementary control of lipid flux by semaglutide and dietary reversion in MASLD
 This repository contains the R scripts for the multiomic analysis. The study aims to explore the shared and distinct mechanisms of dietary modification and glucogon-like-peptide 1 receptor agonists (GLP-1RA) in metabolic dysfunction associated steatotic liver disease.
 
 ## Manuscript Details
-Title: Distinct systemic impacts and multiomic fingerprints of glucagon-like peptide-1 receptor agonist and diet intervention in MASLD
+Title: Complementary control of lipid flux by semaglutide and dietary reversion in MASLD
+
 DOI: Pending
 Link: Pending
 
